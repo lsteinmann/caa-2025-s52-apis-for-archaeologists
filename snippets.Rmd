@@ -1,0 +1,215 @@
+---
+title: "Untapped Potential or Unusable Complexity?"
+author: "Lisa Steinmann"
+date: "2025-05-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Challenges of Providing APIs for Archaeologists
+The German Archaeological Institute (DAI) provides several online services, unified under the banner of the iDAI.world: These include among other systems iDAI.objects (formerly known as Arachne and initially developed at the Universität zu Köln) - a database of archaeological objects and entities which in its more than 20 year tenure has changed its appearance and expanded the bounds of its content multiple times; iDAI.gazetteer, an authority system for archaeological 'places' and their names; and iDAI.chronontology, a platform that allows the structured presentation of time periods and their spatial extent. In one way or another, all of these systems also provide their own application programming interface (API), allowing dynamic access to the underlying data. However, these APIs are not equally successful in terms of utilization. They vary greatly in what they can do and, as far as we can tell, people’s use of them is also quite heterogeneous to non-existent. On the one hand, perhaps our target audience is simply not familiar with using programming interfaces to compile data, as this requires at least some experience and training in programming languages or scripting. On the other hand, perhaps our APIs and their documentation, or the data itself, are the problem?
+
+# Examples and Code snippets
+
+This document compiles a few approaches to using the aforementioned APIs to accompany the lecture at CAA in Athens on 06.05.2025.
+
+## iDAI.gazetteer
+- Stores: place names (toponyms) and their geographical coordinates (points as well as polygons). 
+- Linked to / Imports: Geonames, DNB, Arachne/iDAI.objects (etc. etc. ...)
+- In its function as an online reference / authority data system, iDAI.gazetteer is not only a static page on the Internet, but also a web service. This means that its data can be specifically filtered and queried via an openly documented programming interface for automated processing ([REST API Documentation](https://gazetteer.dainst.org/app/#!/help))
+
+# Use Cases
+As the most basic example, you may want to get a list of names in different languages along with the geographical location for something you have already referenced with the iDAI.gazetteer-ID:
+
+```{r}
+library(crul)
+library(jsonlite)
+client <- HttpClient$new(
+  url = "https://gazetteer.dainst.org/",
+  # For the gazetteer, if you want to get the highert coordinate precision
+  # available you need to have an account and use authentication for the 
+  # requests:
+  #my_very_secret_account,
+  headers = list(Accept = "application/json")
+)
+gazId <- c(2070079, 2070134, 2307623, 2296361)
+docs <- lapply(gazId, function(x) {
+  tmp <- client$get(path = paste0("doc/", x))
+  fromJSON(tmp$parse("UTF-8"))
+ })
+
+lapply(docs, function(x) {
+  x$names$title
+})
+```
+
+This could be used to display the name according to available languages, or to enrich your data and analyses accordingly. 
+
+You may also want to get a list of all places assigned to a specific area, let's say Greece:
+
+```{r}
+# Greece: https://gazetteer.dainst.org/place/2070079
+type <- "archaeological-site"
+q_body <- paste0(
+  '{"bool":{"must":[{"bool":{"should":[
+  {"match":{"parent":"', gazId[1], '"}},
+  {"match":{"ancestors":"', gazId[1], '"}}]}},
+  {"match":{"types":"', type, '"}}]}}')
+response <- client$get(
+  path = "search.json",
+  query = list(
+    type = "extended",
+    q = q_body,
+    limit = 1000, 
+    noPolygons = "true"
+  )
+)
+data <- fromJSON(response$parse("UTF-8"))
+paste(data$result$prefName$title[1:25], collapse = ", ")
+```
+
+However, the query structure of Elasticsearch is not necessarily intuitive. With the obvious exception of JavaScript, working with JSON structures not very straightforward in most programming languages. In the end, the API is not tailored to what any archaeologist might want or need from it. 
+
+And subsequently, you'd be able to plot these: 
+```{r}
+library(sf)
+library(dplyr)
+library(ggplot2)
+
+points <- lapply(data$result$prefLocation$coordinates,
+                 function(x) { if (!is.null(x)) { st_point(x) }}) %>%
+  st_sfc() %>%
+  st_sf(geometry = .)
+
+ggplot(points) + 
+  geom_sf()
+```
+
+
+And of course, also attach some of the attributes: 
+
+```{r}
+points %>%
+  mutate(sanctuary = sapply(data$result$tags, function(x) "sanctuary" %in% x)) %>%
+  ggplot(aes(color = sanctuary)) + 
+  geom_sf(alpha = 0.5)
+```
+
+
+## iDAI.chronontology
+
+- Stores: definition of chronological periods as used in archaeology and history, together with literature references, absolute dates and geographical extent. 
+- Linked to / Imports: PeriodO, Getty AAT, Arachne/iDAI.objects, iDAI.gazetteer 
+- iDAI.chronontology is an online reference / authority data system. Data can be specifically filtered and downloaded via its frontend, but the API for automated processing is currently not accessibly documented, though it is possible to use it, see the [REST API Documentation on GitHub](https://github.com/dainst/chronontology-backend/blob/master/docs/rest-api-reference.md).
+
+Let's start again with the most basic example of getting one specific period that could be used to supplement or enrich your research data:
+
+```{r}
+client <- HttpClient$new(
+  url = "https://chronontology.dainst.org/",
+  headers = list(Accept = "application/json")
+)
+# "Hellenistic": http://chronontology.dainst.org/period/VlDec80jvI8H 
+chronId <- c("VlDec80jvI8H")
+doc <- client$get(path = paste0("data/period/", chronId))
+doc <- fromJSON(doc$parse("UTF-8"))
+doc$resource$names
+doc$resource$hasTimespan$begin$at
+doc$resource$hasTimespan$end$at
+```
+
+Starting from this, one may easily get all the periods that are "contained" in this specific period:
+
+```{r}
+chronId <- doc$resource$relations$contains
+docs <- lapply(chronId, function(x) {
+  tmp <- client$get(path = paste0("data/period/", x))
+  fromJSON(tmp$parse("UTF-8"))
+ })
+
+lapply(docs, function(x) {
+  list(
+    name = x$resource$names$en, 
+    begin = x$resource$hasTimespan$begin$at,
+    end = x$resource$hasTimespan$end$at
+  )
+}) %>% 
+  bind_rows() %>%
+  head()
+```
+
+It is also possible to produce a query, but the functionality is very limited: 
+
+```{r}
+docs <- client$get(path = "data/period", query = list(
+    q = 'hellenistic',
+    exists = 'resource.hasTimespan',
+    size = 200
+))
+docs <- fromJSON(docs$parse("UTF-8"))
+
+docs$results$resource$names$en %>%
+  unlist() %>% 
+  paste(collapse = ", ")
+```
+
+
+
+## iDAI.objects
+
+- Stores: Arachne started as a database for sculpture and images, and over the last 30 years was extended to encompass multiple different “things” related to archaeological research. Arachne became a web of archaeological knowledge in itself.  
+- Linked to / Imports: iDAI.bibliography, iDAI.gazetteer (among others)
+- iDAI.objects is an online database and image publication platform. Data can be specifically filtered and viewed via its frontend. The METS for books can be harvested via OAI-PMH interface, but there is currently no API for automated processing that would access the ‘original’ data of all entries in the data base. A formatted variant can be accessed via the [REST API used by the frontend](https://github.com/dainst/arachne4/blob/main/frontend/docs/rest-api-reference.md). (And info on the [OAI-PMH interface](https://arachne.dainst.org/info/apis).)
+
+Again, we can start again with the most basic example of getting one specific object and "anything we can get" about it, to make sense of the data:
+
+```{r}
+client <- HttpClient$new(
+  url = "https://arachne.dainst.org/",
+  headers = list(Accept = "application/json")
+)
+# "Hellenistic": http://chronontology.dainst.org/period/VlDec80jvI8H 
+entityId <- c("1074604")
+doc <- client$get(path = paste0("data/entity/", entityId))
+doc <- fromJSON(doc$parse("UTF-8"))
+doc$title
+doc$references %>% knitr::kable()
+```
+
+Also, it would not be complicated to get all entityIDs and at least a little info on all entities connected to one other entity (in this case Miletus): 
+
+```{r}
+# Miletus: https://arachne.dainst.org/entity/886
+docs <- client$get(path = "data/search", query = list(
+    q = 'connectedEntities:886',
+    limit = 1000
+))
+docs <- fromJSON(docs$parse("UTF-8"))
+
+# docs$entities$title %>% unlist() %>% paste(collapse = ", ")
+```
+
+
+This way, we could grab all the info on said entities, and display a graph on all entities connected to Miletus and their dating as well as their material. 
+
+```{r, fig.height=5, fig.width=12}
+docs <- lapply(docs$entities$entityId, function(x) {
+  tmp <- client$get(path = paste0("data/entity/", x))
+  fromJSON(tmp$parse("UTF-8"))
+ })
+
+lapply(docs, function(x) {
+  list(
+    title = x$title, 
+    dates = x$dates$label,
+    material = x$facet_material
+  )
+}) %>% 
+  bind_rows() %>%
+  ggplot(aes(x = dates, fill = material)) + 
+  geom_bar() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
